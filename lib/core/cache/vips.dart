@@ -322,33 +322,60 @@ class Vips {
     required int channels,
     required int longEdge,
   }) {
-    if (width <= 0 ||
+    final input = malloc<Uint8>(rgb.length)
+      ..asTypedList(rgb.length).setAll(0, rgb);
+    try {
+      return thumbnailRgbPointer(
+        input,
+        byteLength: rgb.length,
+        width: width,
+        height: height,
+        channels: channels,
+        longEdge: longEdge,
+      );
+    } finally {
+      malloc.free(input);
+    }
+  }
+
+  /// Downscales RGB pixels at [rgb] and encodes a JPEG without copying input.
+  ///
+  /// [rgb] must remain valid until this synchronous call returns. libvips is
+  /// lazy, but [_save] evaluates the complete pipeline before the source image
+  /// is released.
+  Uint8List? thumbnailRgbPointer(
+    Pointer<Uint8> rgb, {
+    required int byteLength,
+    required int width,
+    required int height,
+    required int channels,
+    required int longEdge,
+  }) {
+    if (rgb == nullptr ||
+        width <= 0 ||
         height <= 0 ||
         channels != 3 ||
         longEdge <= 0 ||
-        rgb.length < width * height * channels) {
+        byteLength < width * height * channels) {
       return null;
     }
 
-    final input = malloc<Uint8>(rgb.length)
-      ..asTypedList(rgb.length).setAll(0, rgb);
     final source = _imageFromMemory(
-      input.cast(),
-      rgb.length,
+      rgb.cast(),
+      byteLength,
       width,
       height,
       channels,
       0, // VIPS_FORMAT_UCHAR
     );
     if (source == nullptr) {
-      malloc.free(input);
       _errorClear();
       return null;
     }
 
-    final outImage = malloc<Pointer<Void>>();
-    final outBuf = malloc<Pointer<Void>>();
-    final outLen = malloc<Size>();
+    final outImage = calloc<Pointer<Void>>();
+    final outBuf = calloc<Pointer<Void>>();
+    final outLen = calloc<Size>();
     var haveThumbnail = false;
     try {
       final rc = _thumbImage(
@@ -371,15 +398,14 @@ class Vips {
       final bytes = Uint8List.fromList(
         outBuf.value.cast<Uint8>().asTypedList(outLen.value),
       );
-      _gFree(outBuf.value);
       return bytes;
     } on Object {
       return null;
     } finally {
       if (haveThumbnail) _gUnref(outImage.value);
       _gUnref(source);
-      malloc
-        ..free(input)
+      if (outBuf.value != nullptr) _gFree(outBuf.value);
+      calloc
         ..free(outImage)
         ..free(outBuf)
         ..free(outLen);

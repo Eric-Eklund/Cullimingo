@@ -28,27 +28,36 @@ void main() {
     );
   });
 
-  group('EmbeddedRawPreview.isLargeEnough', () {
+  group('EmbeddedRawPreview.isUsable', () {
     EmbeddedRawPreview preview(int width, int height) => EmbeddedRawPreview(
       bytes: Uint8List(0),
       width: width,
       height: height,
-      rawWidth: 6064,
-      rawHeight: 4040,
     );
 
-    test('rejects a tiny embedded thumbnail for a grid preview', () {
-      expect(preview(160, 120).isLargeEnough(512), isFalse);
+    test('rejects a tiny embedded thumbnail', () {
+      expect(preview(160, 120).isUsable, isFalse);
     });
 
-    test('accepts an embedded preview that covers the requested tier', () {
-      expect(preview(1024, 683).isLargeEnough(1024), isTrue);
+    test('accepts a normal embedded preview regardless of cache tier', () {
+      expect(preview(512, 341).isUsable, isTrue);
+      expect(preview(1600, 1067).isUsable, isTrue);
     });
 
-    test('allows a small sensor crop for the full-resolution tier', () {
-      expect(preview(6048, 4032).isLargeEnough(0), isTrue);
-      expect(preview(160, 120).isLargeEnough(0), isFalse);
+    test('keeps the old fast path when dimensions are unknown', () {
+      expect(preview(0, 0).isUsable, isTrue);
     });
+  });
+
+  test('reads JPEG dimensions without decoding pixels', () {
+    final encoded = Uint8List.fromList(
+      img.encodeJpg(img.Image(width: 37, height: 23)),
+    );
+    expect(jpegDimensions(encoded), (width: 37, height: 23));
+    expect(
+      jpegDimensions(Uint8List.fromList([0xff, 0xd8, 0xff, 0xd9])),
+      isNull,
+    );
   });
 
   test('loads the FFI lib and fails gracefully on a non-RAW file', () async {

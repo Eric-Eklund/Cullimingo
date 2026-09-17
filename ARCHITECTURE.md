@@ -37,6 +37,11 @@ packages/
   Decode-once, reuse.
 
 ## Deviations from BUILD_PLAN.md (keep this list honest)
+- **Tiny-preview RAW fallback:** embedded JPEGs remain the normal fast path,
+  including previews smaller than the current loupe tier. When a RAW contains
+  only an unusably small preview (long edge below 512 px), the preview workers
+  perform a neutral LibRaw demosaic and cache an sRGB JPEG. This is a culling
+  fallback for files such as Nikon HLG NEFs, not a colour-managed RAW developer.
 - **Deliberate cull ↔ filter/inspector coupling** (July 2026): pure grouping
   domain (bursts, RAW+JPEG pairs, brackets) lives in `shared/grouping/` and
   orientation math in `core/raw/`, so features no longer reach into

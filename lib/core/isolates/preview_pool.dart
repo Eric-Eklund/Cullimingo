@@ -48,10 +48,9 @@ class PreviewPool implements PreviewExtractor {
 
   /// How long a dispatched job may run before its worker is presumed dead or
   /// hung (a native RAW/vips decode can segfault or OOM-kill the isolate, which
-  /// is uncatchable). Real extractions are tens of ms, so this only ever fires
-  /// on a genuinely lost worker — generous enough to never false-positive on a
-  /// slow external-drive read.
-  static const Duration _jobTimeout = Duration(seconds: 12);
+  /// is uncatchable). Most jobs take milliseconds, but the rare full-demosaic
+  /// fallback can legitimately take longer on a slow external drive.
+  static const Duration _jobTimeout = Duration(seconds: 60);
 
   // Live workers by id, with the reverse port→id map filled at registration —
   // so a job timeout can identify and kill exactly the worker that hung, and a
@@ -300,7 +299,7 @@ Uint8List? _extractInWorker(
   if (isRawPath(path)) {
     if (libraw == null) return null;
     final embedded = extractRawPreview(libraw, path);
-    if (embedded?.isLargeEnough(longEdge) ?? false) {
+    if (embedded?.isUsable ?? false) {
       source = embedded!.bytes;
     } else if (vips != null) {
       return _decodeRawFallback(
@@ -341,7 +340,7 @@ Uint8List? _extractFull(
   if (isRawPath(path)) {
     if (libraw == null) return null;
     final embedded = extractRawPreview(libraw, path);
-    if (embedded?.isLargeEnough(0) ?? false) return embedded!.bytes;
+    if (embedded?.isUsable ?? false) return embedded!.bytes;
     if (vips == null) return embedded?.bytes;
     return _decodeRawFallback(
       libraw,
@@ -366,17 +365,23 @@ Uint8List? _decodeRawFallback(
   required bool halfSize,
   required Vips vips,
 }) {
-  final bitmap = decodeRawBitmap(libraw, path, halfSize: halfSize);
-  if (bitmap == null) return null;
-  final targetEdge = longEdge > 0
-      ? longEdge
-      : (bitmap.width >= bitmap.height ? bitmap.width : bitmap.height);
-  return vips.thumbnailRgb(
-    bitmap.pixels,
-    width: bitmap.width,
-    height: bitmap.height,
-    channels: bitmap.channels,
-    longEdge: targetEdge,
+  return processRawBitmap<Uint8List>(
+    libraw,
+    path,
+    halfSize: halfSize,
+    consume: (pixels, byteLength, width, height, channels) {
+      final targetEdge = longEdge > 0
+          ? longEdge
+          : (width >= height ? width : height);
+      return vips.thumbnailRgbPointer(
+        pixels,
+        byteLength: byteLength,
+        width: width,
+        height: height,
+        channels: channels,
+        longEdge: targetEdge,
+      );
+    },
   );
 }
 

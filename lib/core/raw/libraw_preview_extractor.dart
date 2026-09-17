@@ -30,6 +30,9 @@ const int _librawImageBitmap = 2;
 /// (type:4 + 4×ushort:8 + data_size:4). Stable across the LibRaw ABI.
 const int _processedDataOffset = 16;
 
+/// Embedded previews below this size are too small for a useful culling view.
+const int _minUsablePreviewLongEdge = 512;
+
 /// Extracts the **embedded full-res JPEG preview** from a RAW file via LibRaw
 /// (`BUILD_PLAN.md` §6.1), then downscales it for the grid. Runs the whole FFI
 /// sequence on a one-off background isolate so the UI never blocks.
@@ -90,8 +93,6 @@ class EmbeddedRawPreview {
     required this.bytes,
     required this.width,
     required this.height,
-    required this.rawWidth,
-    required this.rawHeight,
   });
 
   /// Encoded JPEG bytes.
@@ -103,24 +104,61 @@ class EmbeddedRawPreview {
   /// Embedded JPEG height.
   final int height;
 
-  /// RAW image width reported by LibRaw.
-  final int rawWidth;
-
-  /// RAW image height reported by LibRaw.
-  final int rawHeight;
-
-  /// Whether this preview is large enough for the requested cache tier.
-  bool isLargeEnough(int longEdge) {
+  /// Whether this preview is useful enough to retain the normal fast path.
+  ///
+  /// Unknown dimensions preserve the old embedded-preview behaviour. The
+  /// fallback is deliberately limited to objectively tiny previews rather
+  /// than demosaicing cameras whose normal preview is merely smaller than a
+  /// high-resolution loupe tier.
+  bool get isUsable {
+    if (width <= 0 || height <= 0) return true;
     final previewEdge = width > height ? width : height;
-    if (longEdge > 0) return previewEdge >= longEdge;
-
-    // Full-size embedded JPEGs can differ from the sensor dimensions by a
-    // small crop (for example 6048 versus 6064 pixels). A 5% tolerance keeps
-    // those on the fast path while rejecting tiny 160×120 thumbnails.
-    final rawEdge = rawWidth > rawHeight ? rawWidth : rawHeight;
-    return rawEdge <= 0 || previewEdge >= rawEdge * 0.95;
+    return previewEdge >= _minUsablePreviewLongEdge;
   }
 }
+
+/// Reads dimensions from a JPEG's SOF marker without decoding its pixels.
+({int width, int height})? jpegDimensions(Uint8List jpeg) {
+  if (jpeg.length < 4 || jpeg[0] != 0xff || jpeg[1] != 0xd8) return null;
+
+  var offset = 2;
+  while (offset < jpeg.length) {
+    while (offset < jpeg.length && jpeg[offset] != 0xff) {
+      offset++;
+    }
+    while (offset < jpeg.length && jpeg[offset] == 0xff) {
+      offset++;
+    }
+    if (offset >= jpeg.length) return null;
+
+    final marker = jpeg[offset++];
+    if (marker == 0xd9 || marker == 0xda) return null;
+    if (marker == 0xd8 ||
+        marker == 0x01 ||
+        (marker >= 0xd0 && marker <= 0xd7)) {
+      continue;
+    }
+    if (offset + 1 >= jpeg.length) return null;
+
+    final segmentLength = (jpeg[offset] << 8) | jpeg[offset + 1];
+    if (segmentLength < 2 || offset + segmentLength > jpeg.length) return null;
+    if (_isStartOfFrame(marker) && segmentLength >= 7) {
+      final height = (jpeg[offset + 3] << 8) | jpeg[offset + 4];
+      final width = (jpeg[offset + 5] << 8) | jpeg[offset + 6];
+      if (width > 0 && height > 0) return (width: width, height: height);
+      return null;
+    }
+    offset += segmentLength;
+  }
+  return null;
+}
+
+bool _isStartOfFrame(int marker) =>
+    marker >= 0xc0 &&
+    marker <= 0xcf &&
+    marker != 0xc4 &&
+    marker != 0xc8 &&
+    marker != 0xcc;
 
 /// Extracts an embedded JPEG and its dimensions from [path].
 EmbeddedRawPreview? extractRawPreview(FlutterLibRawBindings lr, String path) {
@@ -143,12 +181,12 @@ EmbeddedRawPreview? extractRawPreview(FlutterLibRawBindings lr, String path) {
     final dataPtr = Pointer<Uint8>.fromAddress(
       processed.address + _processedDataOffset,
     );
+    final bytes = Uint8List.fromList(dataPtr.asTypedList(image.data_size));
+    final dimensions = jpegDimensions(bytes);
     return EmbeddedRawPreview(
-      bytes: Uint8List.fromList(dataPtr.asTypedList(image.data_size)),
-      width: image.width,
-      height: image.height,
-      rawWidth: handle.ref.sizes.width,
-      rawHeight: handle.ref.sizes.height,
+      bytes: bytes,
+      width: image.width > 0 ? image.width : dimensions?.width ?? 0,
+      height: image.height > 0 ? image.height : dimensions?.height ?? 0,
     );
   } on Object {
     return null;
@@ -160,44 +198,30 @@ EmbeddedRawPreview? extractRawPreview(FlutterLibRawBindings lr, String path) {
   }
 }
 
-/// An 8-bit RGB image rendered from a RAW sensor mosaic.
-///
-/// This is the deliberately slower fallback for RAW files without a usable
-/// embedded JPEG preview (for example Nikon HLG/BT.2100 NEFs). The preview
-/// pool immediately downsizes these pixels with libvips and caches the JPEG,
-/// so the demosaic cost is paid only once per preview tier.
-class DecodedRawBitmap {
-  /// Creates decoded bitmap data owned by Dart.
-  const DecodedRawBitmap({
-    required this.pixels,
-    required this.width,
-    required this.height,
-    required this.channels,
-  });
+/// Synchronous consumer of an 8-bit interleaved LibRaw bitmap.
+typedef RawBitmapConsumer<T> =
+    T? Function(
+      Pointer<Uint8> pixels,
+      int byteLength,
+      int width,
+      int height,
+      int channels,
+    );
 
-  /// Interleaved 8-bit pixel bytes.
-  final Uint8List pixels;
-
-  /// Pixel width after LibRaw applies the camera orientation.
-  final int width;
-
-  /// Pixel height after LibRaw applies the camera orientation.
-  final int height;
-
-  /// Number of interleaved channels (currently required to be RGB).
-  final int channels;
-}
-
-/// Fully decodes [path] through LibRaw and returns an 8-bit RGB bitmap.
+/// Fully decodes [path] and lends its 8-bit RGB buffer to [consume].
 ///
 /// [halfSize] uses LibRaw's half-resolution mode: still large enough for the
 /// grid and screen-resolution loupe, but around one quarter of the pixels and
 /// memory. The full tier disables it for genuine 100% zoom. Camera white
 /// balance is applied and output is converted to sRGB; this is a practical SDR
 /// culling preview, not a colour-managed rendering of an HLG master.
-DecodedRawBitmap? decodeRawBitmap(
+///
+/// The pointer is valid only during the synchronous [consume] call. Lending
+/// it directly to libvips avoids two full-size bitmap copies per worker.
+T? processRawBitmap<T>(
   FlutterLibRawBindings lr,
   String path, {
+  required RawBitmapConsumer<T> consume,
   bool halfSize = true,
 }) {
   final handle = lr.libraw_init(0);
@@ -240,11 +264,12 @@ DecodedRawBitmap? decodeRawBitmap(
     final dataPtr = Pointer<Uint8>.fromAddress(
       processed.address + _processedDataOffset,
     );
-    return DecodedRawBitmap(
-      pixels: Uint8List.fromList(dataPtr.asTypedList(expected)),
-      width: image.width,
-      height: image.height,
-      channels: image.colors,
+    return consume(
+      dataPtr,
+      expected,
+      image.width,
+      image.height,
+      image.colors,
     );
   } on Object {
     return null;
