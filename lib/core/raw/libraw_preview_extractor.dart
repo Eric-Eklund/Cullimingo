@@ -28,6 +28,10 @@ const int _librawImageBitmap = 2;
 
 /// Offset of the flexible `data[]` member in `libraw_processed_image_t`
 /// (type:4 + 4×ushort:8 + data_size:4). Stable across the LibRaw ABI.
+///
+/// The generated bindings target LibRaw 0.21.2. The direct `params` writes in
+/// [processRawBitmap] rely on the 0.21/0.22 `libraw_output_params_t` layout;
+/// LibRaw 0.20 has a different field order and is not a compatible runtime.
 const int _processedDataOffset = 16;
 
 /// Embedded previews below this size are too small for a useful culling view.
@@ -233,8 +237,9 @@ T? processRawBitmap<T>(
   try {
     if (lr.libraw_open_file(handle, pathC.cast<Uint8>()) != 0) return null;
 
-    // The generated bindings expose libraw_data_t::params. Half-size keeps a
-    // 24 MP fallback near 18 MB instead of 74 MB per preview worker.
+    // The generated bindings expose libraw_data_t::params. See the ABI note at
+    // [_processedDataOffset]. Half-size keeps a 24 MP fallback near 18 MB
+    // instead of 74 MB per preview worker.
     handle.ref.params
       ..half_size = halfSize ? 1 : 0
       ..use_camera_wb = 1;
