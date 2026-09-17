@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:cullimingo/core/raw/libraw_preview_extractor.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -25,6 +26,29 @@ void main() {
       await const LibRawPreviewExtractor().thumbnail('/no/such.arw'),
       null,
     );
+  });
+
+  group('EmbeddedRawPreview.isLargeEnough', () {
+    EmbeddedRawPreview preview(int width, int height) => EmbeddedRawPreview(
+      bytes: Uint8List(0),
+      width: width,
+      height: height,
+      rawWidth: 6064,
+      rawHeight: 4040,
+    );
+
+    test('rejects a tiny embedded thumbnail for a grid preview', () {
+      expect(preview(160, 120).isLargeEnough(512), isFalse);
+    });
+
+    test('accepts an embedded preview that covers the requested tier', () {
+      expect(preview(1024, 683).isLargeEnough(1024), isTrue);
+    });
+
+    test('allows a small sensor crop for the full-resolution tier', () {
+      expect(preview(6048, 4032).isLargeEnough(0), isTrue);
+      expect(preview(160, 120).isLargeEnough(0), isFalse);
+    });
   });
 
   test('loads the FFI lib and fails gracefully on a non-RAW file', () async {

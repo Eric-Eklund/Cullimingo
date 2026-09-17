@@ -3,6 +3,14 @@
 All notable user-facing changes to Cullimingo. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); dates are `YYYY-MM-DD`.
 
+## Unreleased
+
+### Fixed
+- **RAW files with only a tiny embedded thumbnail now render usable previews:**
+  when cameras such as the Nikon Z6 III in HLG mode provide only a 160×120
+  JPEG, Cullimingo falls back to a LibRaw demosaic for the grid and loupe
+  instead of stretching the unusable thumbnail or leaving the photo blank.
+
 ## 1.3.1 — 2026-08-19
 
 ### Fixed

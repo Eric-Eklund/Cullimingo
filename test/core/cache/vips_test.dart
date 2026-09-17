@@ -71,6 +71,32 @@ void main() {
     expect(out!.sublist(0, 2), [0xFF, 0xD8]); // JPEG magic
   });
 
+  test('encodes and downsizes interleaved RGB pixels', () {
+    if (!hasVips) {
+      markTestSkipped('libvips not installed');
+      return;
+    }
+    final rgb = Uint8List(400 * 200 * 3);
+    for (var i = 0; i < rgb.length; i += 3) {
+      rgb[i] = 230;
+      rgb[i + 1] = 80;
+      rgb[i + 2] = 30;
+    }
+
+    final out = vips.thumbnailRgb(
+      rgb,
+      width: 400,
+      height: 200,
+      channels: 3,
+      longEdge: 100,
+    );
+
+    expect(out, isNotNull);
+    final decoded = img.decodeJpg(out!)!;
+    expect(decoded.width, 100);
+    expect(decoded.height, 50);
+  });
+
   test('warmUpProcess completes without throwing', () {
     // Registers the JPEG + HEIF loader types on the main isolate; must be a
     // no-throw best effort whether or not libvips/libheif are present.

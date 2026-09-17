@@ -37,6 +37,44 @@ typedef _ThumbDart =
       Pointer<Void>,
     );
 
+// vips_image_new_from_memory(data, len, width, height, bands, format)
+typedef _ImageFromMemoryNative =
+    Pointer<Void> Function(
+      Pointer<Void>,
+      Size,
+      Int,
+      Int,
+      Int,
+      Int,
+    );
+typedef _ImageFromMemoryDart =
+    Pointer<Void> Function(
+      Pointer<Void>,
+      int,
+      int,
+      int,
+      int,
+      int,
+    );
+
+// vips_thumbnail_image(VipsImage* in, VipsImage** out, int width, ...)
+typedef _ThumbImageNative =
+    Int Function(
+      Pointer<Void>,
+      Pointer<Pointer<Void>>,
+      Int,
+      VarArgs<(Pointer<Utf8>, Int, Pointer<Void>)>,
+    );
+typedef _ThumbImageDart =
+    int Function(
+      Pointer<Void>,
+      Pointer<Pointer<Void>>,
+      int,
+      Pointer<Utf8>,
+      int,
+      Pointer<Void>,
+    );
+
 // vips_jpegsave_buffer(VipsImage* in, void** buf, size_t* len, ...)
 typedef _SaveNative =
     Int Function(
@@ -104,10 +142,19 @@ const Map<String, List<String>> _candidates = {
 /// auto-rotate). Replaces the slow pure-Dart resize for the preview pipeline
 /// (`BUILD_PLAN.md` §2/§6.1). Load once per isolate via [tryLoad].
 class Vips {
-  Vips._(this._thumb, this._save, this._gFree, this._gUnref, this._errorClear)
-    : _heightKey = 'height'.toNativeUtf8();
+  Vips._(
+    this._thumb,
+    this._imageFromMemory,
+    this._thumbImage,
+    this._save,
+    this._gFree,
+    this._gUnref,
+    this._errorClear,
+  ) : _heightKey = 'height'.toNativeUtf8();
 
   final _ThumbDart _thumb;
+  final _ImageFromMemoryDart _imageFromMemory;
+  final _ThumbImageDart _thumbImage;
   final _SaveDart _save;
   final _PtrVoidDart _gFree;
   final _PtrVoidDart _gUnref;
@@ -196,6 +243,12 @@ class Vips {
 
       return Vips._(
         vips.lookupFunction<_ThumbNative, _ThumbDart>('vips_thumbnail_buffer'),
+        vips.lookupFunction<_ImageFromMemoryNative, _ImageFromMemoryDart>(
+          'vips_image_new_from_memory',
+        ),
+        vips.lookupFunction<_ThumbImageNative, _ThumbImageDart>(
+          'vips_thumbnail_image',
+        ),
         vips.lookupFunction<_SaveNative, _SaveDart>('vips_jpegsave_buffer'),
         glib.lookupFunction<_PtrVoidNative, _PtrVoidDart>('g_free'),
         gobject.lookupFunction<_PtrVoidNative, _PtrVoidDart>('g_object_unref'),
@@ -249,6 +302,82 @@ class Vips {
       return null;
     } finally {
       if (haveImage) _gUnref(outImage.value);
+      malloc
+        ..free(input)
+        ..free(outImage)
+        ..free(outBuf)
+        ..free(outLen);
+    }
+  }
+
+  /// Downscales interleaved 8-bit [rgb] pixels and encodes a JPEG.
+  ///
+  /// LibRaw's full-decode fallback produces an RGB bitmap rather than an
+  /// encoded image. Feeding it to vips as memory avoids a huge intermediate
+  /// PPM/TIFF file while retaining the same fast native resize/cache pipeline.
+  Uint8List? thumbnailRgb(
+    Uint8List rgb, {
+    required int width,
+    required int height,
+    required int channels,
+    required int longEdge,
+  }) {
+    if (width <= 0 ||
+        height <= 0 ||
+        channels != 3 ||
+        longEdge <= 0 ||
+        rgb.length < width * height * channels) {
+      return null;
+    }
+
+    final input = malloc<Uint8>(rgb.length)
+      ..asTypedList(rgb.length).setAll(0, rgb);
+    final source = _imageFromMemory(
+      input.cast(),
+      rgb.length,
+      width,
+      height,
+      channels,
+      0, // VIPS_FORMAT_UCHAR
+    );
+    if (source == nullptr) {
+      malloc.free(input);
+      _errorClear();
+      return null;
+    }
+
+    final outImage = malloc<Pointer<Void>>();
+    final outBuf = malloc<Pointer<Void>>();
+    final outLen = malloc<Size>();
+    var haveThumbnail = false;
+    try {
+      final rc = _thumbImage(
+        source,
+        outImage,
+        longEdge,
+        _heightKey,
+        longEdge,
+        nullptr,
+      );
+      if (rc != 0) {
+        _errorClear();
+        return null;
+      }
+      haveThumbnail = true;
+      if (_save(outImage.value, outBuf, outLen, nullptr) != 0) {
+        _errorClear();
+        return null;
+      }
+      final bytes = Uint8List.fromList(
+        outBuf.value.cast<Uint8>().asTypedList(outLen.value),
+      );
+      _gFree(outBuf.value);
+      return bytes;
+    } on Object {
+      return null;
+    } finally {
+      if (haveThumbnail) _gUnref(outImage.value);
+      _gUnref(source);
       malloc
         ..free(input)
         ..free(outImage)

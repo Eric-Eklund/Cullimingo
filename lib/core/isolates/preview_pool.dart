@@ -91,11 +91,12 @@ class PreviewPool implements PreviewExtractor {
   Future<void> _spawnWorker() async {
     if (_disposed) return;
     final workerId = _spawnCount++;
-    final iso = await Isolate.spawn(
-      _previewWorkerMain,
-      [_results!.sendPort, _librawPath, enableVips, workerId],
-      debugName: 'preview-worker-$workerId',
-    );
+    final iso = await Isolate.spawn(_previewWorkerMain, [
+      _results!.sendPort,
+      _librawPath,
+      enableVips,
+      workerId,
+    ], debugName: 'preview-worker-$workerId');
     if (_disposed) {
       // dispose() ran while the spawn was in flight — don't leak the isolate.
       iso.kill(priority: Isolate.immediate);
@@ -291,12 +292,27 @@ Uint8List? _extractInWorker(
 
   // Full-resolution request (longEdge <= 0): the original bitmap or a RAW's
   // full embedded JPEG, undownscaled, for true 100% pixel-peeping in the loupe.
-  if (longEdge <= 0) return _extractFull(path, libraw, vips);
+  if (longEdge <= 0) {
+    return _extractFull(path, libraw, vips);
+  }
 
   Uint8List? source;
   if (isRawPath(path)) {
     if (libraw == null) return null;
-    source = extractRawThumbnail(libraw, path); // full embedded JPEG
+    final embedded = extractRawPreview(libraw, path);
+    if (embedded?.isLargeEnough(longEdge) ?? false) {
+      source = embedded!.bytes;
+    } else if (vips != null) {
+      return _decodeRawFallback(
+        libraw,
+        path,
+        longEdge: longEdge,
+        halfSize: true,
+        vips: vips,
+      );
+    } else {
+      source = embedded?.bytes;
+    }
   } else {
     final file = File(path);
     if (!file.existsSync()) return null;
@@ -323,7 +339,17 @@ Uint8List? _extractFull(
   Vips? vips,
 ) {
   if (isRawPath(path)) {
-    return libraw == null ? null : extractRawThumbnail(libraw, path);
+    if (libraw == null) return null;
+    final embedded = extractRawPreview(libraw, path);
+    if (embedded?.isLargeEnough(0) ?? false) return embedded!.bytes;
+    if (vips == null) return embedded?.bytes;
+    return _decodeRawFallback(
+      libraw,
+      path,
+      longEdge: 0,
+      halfSize: false,
+      vips: vips,
+    );
   }
   final file = File(path);
   if (!file.existsSync()) return null;
@@ -331,6 +357,27 @@ Uint8List? _extractFull(
   if (isBitmapPath(path)) return bytes;
   // Large edge = "don't upscale"; vips caps at the source's native size.
   return vips?.thumbnail(bytes, 20000) ?? bytes;
+}
+
+Uint8List? _decodeRawFallback(
+  FlutterLibRawBindings libraw,
+  String path, {
+  required int longEdge,
+  required bool halfSize,
+  required Vips vips,
+}) {
+  final bitmap = decodeRawBitmap(libraw, path, halfSize: halfSize);
+  if (bitmap == null) return null;
+  final targetEdge = longEdge > 0
+      ? longEdge
+      : (bitmap.width >= bitmap.height ? bitmap.width : bitmap.height);
+  return vips.thumbnailRgb(
+    bitmap.pixels,
+    width: bitmap.width,
+    height: bitmap.height,
+    channels: bitmap.channels,
+    longEdge: targetEdge,
+  );
 }
 
 /// Extracts a video poster frame: QuickLook (`qlmanage -t`) on macOS,
