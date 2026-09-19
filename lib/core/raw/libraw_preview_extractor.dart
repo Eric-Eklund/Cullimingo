@@ -28,10 +28,6 @@ const int _librawImageBitmap = 2;
 
 /// Offset of the flexible `data[]` member in `libraw_processed_image_t`
 /// (type:4 + 4×ushort:8 + data_size:4). Stable across the LibRaw ABI.
-///
-/// The generated bindings target LibRaw 0.21.2. The direct `params` writes in
-/// [processRawBitmap] rely on the 0.21/0.22 `libraw_output_params_t` layout;
-/// LibRaw 0.20 has a different field order and is not a compatible runtime.
 const int _processedDataOffset = 16;
 
 /// Embedded previews below this size are too small for a useful culling view.
@@ -237,12 +233,32 @@ T? processRawBitmap<T>(
   try {
     if (lr.libraw_open_file(handle, pathC.cast<Uint8>()) != 0) return null;
 
-    // The generated bindings expose libraw_data_t::params. See the ABI note at
-    // [_processedDataOffset]. Half-size keeps a 24 MP fallback near 18 MB
-    // instead of 74 MB per preview worker.
-    handle.ref.params
-      ..half_size = halfSize ? 1 : 0
-      ..use_camera_wb = 1;
+    // Use the stable C accessors instead of writing `use_camera_wb` through
+    // libraw_data_t. The bindings target 0.21.2, while a system LibRaw 0.22 can
+    // move `params` inside that outer struct; direct access then silently sets
+    // the wrong field and falls back to a very warm daylight white balance.
+    final cameraMultipliers = [
+      for (var channel = 0; channel < 4; channel++)
+        lr.libraw_get_cam_mul(handle, channel),
+    ];
+    if (cameraMultipliers.take(3).every((value) => value > 0)) {
+      if (cameraMultipliers[3] <= 0) {
+        cameraMultipliers[3] = cameraMultipliers[1];
+      }
+      for (var channel = 0; channel < 4; channel++) {
+        lr.libraw_set_user_mul(handle, channel, cameraMultipliers[channel]);
+      }
+    }
+
+    // LibRaw has no C setter for half_size. It is safe to use the generated
+    // struct only with the 0.21 ABI it was generated from. Newer runtimes take
+    // the full-resolution path instead of risking a write at the wrong offset.
+    final version = lr.libraw_versionNumber();
+    final major = (version >> 16) & 0xff;
+    final minor = (version >> 8) & 0xff;
+    if (major == 0 && minor == 21) {
+      handle.ref.params.half_size = halfSize ? 1 : 0;
+    }
     lr
       ..libraw_set_demosaic(handle, 0) // fast linear interpolation
       ..libraw_set_output_color(handle, 1) // sRGB
